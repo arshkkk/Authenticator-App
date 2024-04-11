@@ -12,31 +12,13 @@ import { useEffect, useRef } from "react";
 import * as Haptics from "expo-haptics";
 import { useNavigation, useRouter } from "expo-router";
 import * as SecureStore from "expo-secure-store";
-
-function extractSecretIssuerAndUsername(uri) {
-  // Regular expression to match the URI format
-  const uriRegex =
-    /^otpauth:\/\/totp\/([^:]+):([^?]+)\?secret=([^&]+)&issuer=([^&]+)/;
-
-  // Match the URI against the regex
-  const match = uri.match(uriRegex);
-  if (!match) {
-    throw new Error("Invalid URI format");
-  }
-
-  // Extract username, secret, and issuer from the regex groups
-  const username = match[2];
-  const secret = match[3];
-  const issuer = match[4];
-
-  return { secret, issuer, username };
-}
+import extractDataFromTOtpUri from "../src/utils/extractDataFromTOtpUri";
 
 export default function AddApp() {
   const router = useRouter();
   const nav = useNavigation();
-  const ref = useRef("");
   const [_, requestPermission] = useCameraPermissions();
+  const processingRef = useRef({ lastGarbageData: [], isProcessing: false });
 
   useEffect(() => {
     requestPermission();
@@ -48,33 +30,47 @@ export default function AddApp() {
     }
   };
 
-  const onQrCodeScanned = async (data) => {
+  const onQrCodeParsingError = (data: string) => {
+    if (processingRef.current.lastGarbageData.includes(data)) return;
+    processingRef.current.lastGarbageData.push(data);
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+  };
+
+  const onQrCodeScanned = async (data: string) => {
+    if (processingRef.current.isProcessing) return;
+    processingRef.current.isProcessing = true;
     if (data) {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-
       try {
-        const { secret, issuer, username } =
-          extractSecretIssuerAndUsername(data);
+        const { secret, issuer, username } = extractDataFromTOtpUri(data);
         const content = await SecureStore.getItemAsync("data");
+        console.log({ content });
+        const parsedData = JSON.parse(content || "[]") || [];
 
-        await SecureStore.setItemAsync(
-          "data",
-          JSON.stringify([
-            ...(JSON.parse(content || "[]") || []),
-            { secret, issuer, username },
-          ]),
-        );
-        router.push("/");
+        // only add when secret is not added
+        if (
+          parsedData.findIndex(
+            (d: { secret: string }) => d.secret === secret,
+          ) === -1
+        ) {
+          await SecureStore.setItemAsync(
+            "data",
+            JSON.stringify([...parsedData, { secret, issuer, username }]),
+            {
+              requireAuthentication: true,
+              authenticationPrompt:
+                "Let's secure your OTP with your biometrics",
+            },
+          );
+        }
+        console.log("here");
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        processingRef.current.isProcessing = false;
+        router.navigate("/");
       } catch (error) {
-        if (data === ref.current) return;
-        ref.current = data;
-        console.error(error.message);
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+        onQrCodeParsingError(data);
       }
     } else {
-      if (data === ref.current) return;
-      ref.current = data;
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      onQrCodeParsingError(data);
     }
   };
 
@@ -92,27 +88,11 @@ export default function AddApp() {
           onQrCodeScanned(scanningResult?.data);
         }}
         style={styles.camera}
-        barcodeScannerSettings={{ barcodeTypes: ["qr"], interval: 100000 }}
+        barcodeScannerSettings={{ barcodeTypes: ["qr"], interval: 1000 }}
       >
-        <View
-          style={{
-            flex: 1,
-            display: "flex",
-            justifyContent: "center",
-            alignItems: "center",
-          }}
-        >
-          <View
-            style={{
-              borderColor: "green",
-              borderWidth: 4,
-              width: Dimensions.get("window").width / 1.25,
-              height: Dimensions.get("window").width / 1.8,
-              backgroundColor: "transparent",
-              zIndex: -1,
-            }}
-          ></View>
-          <Text style={{ color: "#fff", fontSize: 18, marginTop: 8 }}>
+        <View style={styles.cameraBorderContainer}>
+          <View style={styles.cameraBorder}></View>
+          <Text style={styles.cameraText}>
             Place QR Code within green lines
           </Text>
         </View>
@@ -138,5 +118,20 @@ const styles = StyleSheet.create({
   },
   camera: {
     flex: 1,
+  },
+  cameraBorder: {
+    borderColor: "green",
+    borderWidth: 4,
+    width: Dimensions.get("window").width / 1.25,
+    height: Dimensions.get("window").width / 1.8,
+    backgroundColor: "transparent",
+    zIndex: -1,
+  },
+  cameraText: { color: "#fff", fontSize: 18, marginTop: 8 },
+  cameraBorderContainer: {
+    flex: 1,
+    display: "flex",
+    justifyContent: "center",
+    alignItems: "center",
   },
 });
